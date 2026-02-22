@@ -13,8 +13,9 @@ export default function CommissionerDraft() {
   const [search, setSearch] = useState('')
   const [filterPosition, setFilterPosition] = useState('all')
   const [timeLeft, setTimeLeft] = useState(null)
+  const [editMode, setEditMode] = useState(false)
+  const [editingPick, setEditingPick] = useState(null)
   const [codeCopied, setCodeCopied] = useState(false)
-  const [linksCopied, setLinksCopied] = useState({})
   const timerRef = useRef(null)
   const pollRef = useRef(null)
 
@@ -48,43 +49,29 @@ export default function CommissionerDraft() {
       fetch('/api/registrants?league_id=' + id),
       fetch('/api/draft/pick?league_id=' + id)
     ])
-    const leagueData = await leagueRes.json()
-    setLeague(leagueData)
+    setLeague(await leagueRes.json())
     setSession(await sessionRes.json())
     setTeams(await teamsRes.json())
     const p = await playersRes.json()
-    setPlayers(Array.isArray(p) ? p.filter(r => r.status === 'paid') : [])
+    setPlayers(Array.isArray(p) ? p.filter(r => r.approval_status === 'approved' && r.payment_status === 'paid') : [])
     const picksData = await picksRes.json()
     setPicks(Array.isArray(picksData) ? picksData : [])
-
-    // Auto-generate GM code if missing
-    if (leagueData && !leagueData.gm_code) {
-      const res = await fetch('/api/draft/codes', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ league_id: id, reset: false })
-      })
-      const data = await res.json()
-      if (data.code) setLeague(prev => ({ ...prev, gm_code: data.code }))
-    }
   }
 
-  // Fixed snake draft logic
   function getCurrentTeam() {
     if (!session || !teams.length) return null
     const sortedTeams = [...teams].sort((a, b) => (a.draft_order || 0) - (b.draft_order || 0))
     const pick = session.current_pick
     const n = sortedTeams.length
     const round = Math.ceil(pick / n)
-    const posInRound = (pick - 1) % n
-    // Odd rounds go forward (1,2,3,4), even rounds go backward (4,3,2,1)
-    const idx = round % 2 === 1 ? posInRound : (n - 1 - posInRound)
+    const posInRound = ((pick - 1) % n)
+    const idx = round % 2 === 0 ? (n - 1 - posInRound) : posInRound
     return sortedTeams[idx]
   }
 
   async function makePick(registrantId) {
     const currentTeam = getCurrentTeam()
-    if (!currentTeam || !session || session?.status !== 'active') return
+    if (!currentTeam || !session) return
     await fetch('/api/draft/pick', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -101,20 +88,40 @@ export default function CommissionerDraft() {
     fetchAll()
   }
 
-  async function undoLastPick() {
-    if (!picks.length) return
-    const lastPick = [...picks].sort((a, b) => b.pick_number - a.pick_number)[0]
+  async function deletePick(pickId) {
+    const pick = picks.find(p => p.id === pickId)
+    if (!pick) return
     await fetch('/api/draft/pick-edit', {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pick_id: lastPick.id })
+      body: JSON.stringify({ pick_id: pickId })
     })
-    await fetch('/api/draft/session', {
+    const maxPick = Math.max(...picks.map(p => p.pick_number))
+    if (pick.pick_number === maxPick) {
+      await fetch('/api/draft/session', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ league_id: id, current_pick: pick.pick_number })
+      })
+    }
+    setEditingPick(null)
+    fetchAll()
+  }
+
+  async function movePick(pickId, newTeamId) {
+    await fetch('/api/draft/pick-edit', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ league_id: id, current_pick: lastPick.pick_number })
+      body: JSON.stringify({ pick_id: pickId, team_id: newTeamId })
     })
+    setEditingPick(null)
     fetchAll()
+  }
+
+  async function undoLastPick() {
+    if (!picks.length) return
+    const lastPick = [...picks].sort((a, b) => b.pick_number - a.pick_number)[0]
+    await deletePick(lastPick.id)
   }
 
   async function togglePause() {
@@ -131,10 +138,10 @@ export default function CommissionerDraft() {
     const res = await fetch('/api/draft/codes', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ league_id: id, reset: true })
+      body: JSON.stringify({ league_id: id, type: 'gm' })
     })
     const data = await res.json()
-    if (data.code) setLeague(prev => ({ ...prev, gm_code: data.code }))
+    setLeague(prev => ({ ...prev, gm_code: data.code }))
   }
 
   async function copyCode() {
@@ -143,16 +150,6 @@ export default function CommissionerDraft() {
     setCodeCopied(true)
     setTimeout(() => setCodeCopied(false), 2000)
   }
-
-  async function copyLink(type, text) {
-    await navigator.clipboard.writeText(text)
-    setLinksCopied(prev => ({ ...prev, [type]: true }))
-    setTimeout(() => setLinksCopied(prev => ({ ...prev, [type]: false })), 2000)
-  }
-
-  const baseUrl = typeof window !== 'undefined' ? window.location.origin : ''
-  const gmLink = `${baseUrl}/draft/${id}/gm`
-  const publicLink = `${baseUrl}/draft/${id}/public`
 
   const pickedIds = new Set(picks.map(p => p.registrant_id))
   const currentTeam = getCurrentTeam()
@@ -178,10 +175,10 @@ export default function CommissionerDraft() {
           <div style={{ fontSize: 16, fontWeight: 700, color: '#F8FAFC' }}>{league?.name}</div>
         </div>
 
-        {/* GM Code */}
+        {/* GM Code display */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'rgba(0,200,150,0.05)', border: '1px solid rgba(0,200,150,0.2)', borderRadius: 8, padding: '8px 14px' }}>
           <div>
-            <div style={{ fontSize: 10, color: '#6B7280', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 2 }}>GM Code</div>
+            <div style={{ fontSize: 10, color: '#6B7280', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 2 }}>GM Code — share with GMs</div>
             <div style={{ fontSize: 20, fontWeight: 800, color: '#00C896', letterSpacing: 4, fontFamily: 'monospace' }}>
               {league?.gm_code || '—'}
             </div>
@@ -192,30 +189,6 @@ export default function CommissionerDraft() {
             </button>
             <button onClick={resetGMCode} style={{ background: 'transparent', border: '1px solid rgba(255,255,255,0.1)', color: '#6B7280', padding: '3px 8px', borderRadius: 4, cursor: 'pointer', fontSize: 11 }}>Reset</button>
           </div>
-        </div>
-
-        {/* Draft links */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          {[
-            { label: 'GM View', link: gmLink, type: 'gm', color: '#00C896' },
-            { label: 'Public', link: publicLink, type: 'public', color: '#4A9EFF' },
-          ].map(({ label, link, type, color }) => (
-            <div key={type} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span style={{ fontSize: 10, color: '#6B7280', width: 44 }}>{label}</span>
-              <button
-                onClick={() => window.open(link, '_blank')}
-                style={{ fontSize: 11, color, background: 'transparent', border: 'none', cursor: 'pointer', textDecoration: 'underline', padding: 0 }}
-              >
-                Open ↗
-              </button>
-              <button
-                onClick={() => copyLink(type, link)}
-                style={{ fontSize: 10, color: linksCopied[type] ? '#00C896' : '#6B7280', background: 'transparent', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 3, cursor: 'pointer', padding: '2px 6px' }}
-              >
-                {linksCopied[type] ? '✓' : 'Copy'}
-              </button>
-            </div>
-          ))}
         </div>
 
         {/* Current pick */}
@@ -240,12 +213,27 @@ export default function CommissionerDraft() {
           <button onClick={undoLastPick} disabled={!picks.length} style={{ padding: '7px 12px', borderRadius: 6, border: '1px solid rgba(255,100,100,0.3)', background: 'rgba(255,100,100,0.08)', color: picks.length ? '#FF6B6B' : '#6B7280', cursor: picks.length ? 'pointer' : 'default', fontSize: 12, fontWeight: 600 }}>
             ↩ Undo Last
           </button>
+          <button onClick={() => { setEditMode(!editMode); setEditingPick(null) }} style={{ padding: '7px 12px', borderRadius: 6, border: '1px solid', borderColor: editMode ? '#FFB800' : 'rgba(255,255,255,0.1)', background: editMode ? 'rgba(255,184,0,0.1)' : 'transparent', color: editMode ? '#FFB800' : '#94A3B8', cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>
+            {editMode ? '✏️ Editing' : '✏️ Edit Picks'}
+          </button>
           <button onClick={togglePause} style={{ padding: '7px 12px', borderRadius: 6, border: '1px solid rgba(255,255,255,0.1)', background: session?.status === 'paused' ? 'rgba(0,200,150,0.1)' : 'rgba(255,184,0,0.1)', color: session?.status === 'paused' ? '#00C896' : '#FFB800', cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>
             {session?.status === 'paused' ? '▶ Resume' : '⏸ Pause'}
           </button>
-          <button onClick={() => window.open(`/draft/${id}/setup`, '_blank')} style={{ padding: '7px 12px', borderRadius: 6, border: '1px solid rgba(255,255,255,0.1)', background: 'transparent', color: '#94A3B8', cursor: 'pointer', fontSize: 12 }}>⚙️ Setup</button>
+          <button onClick={() => router.push('/draft/' + id + '/setup')} style={{ padding: '7px 12px', borderRadius: 6, border: '1px solid rgba(255,255,255,0.1)', background: 'transparent', color: '#94A3B8', cursor: 'pointer', fontSize: 12 }}>Setup</button>
         </div>
       </div>
+
+      {/* Edit mode banner */}
+      {editMode && (
+        <div style={{ background: 'rgba(255,184,0,0.07)', borderBottom: '1px solid rgba(255,184,0,0.15)', padding: '10px 24px', fontSize: 13, color: '#FFB800' }}>
+          ✏️ <strong>Edit Mode</strong> — Click a pick to select it, then click another team column to move it there. Click ✕ to delete a pick.
+          {editingPick && (
+            <span style={{ marginLeft: 16, color: '#F8FAFC' }}>
+              Selected: <strong>{players.find(p => p.id === editingPick.registrant_id)?.name}</strong> — click a team to reassign, or ✕ to delete
+            </span>
+          )}
+        </div>
+      )}
 
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
 
@@ -278,9 +266,9 @@ export default function CommissionerDraft() {
             {availablePlayers.map(p => (
               <div
                 key={p.id}
-                onClick={() => session?.status === 'active' && makePick(p.id)}
-                style={{ padding: '10px 14px', borderBottom: '1px solid rgba(255,255,255,0.04)', cursor: session?.status === 'active' ? 'pointer' : 'default', display: 'flex', alignItems: 'center', gap: 10 }}
-                onMouseEnter={e => { if (session?.status === 'active') e.currentTarget.style.background = 'rgba(255,255,255,0.04)' }}
+                onClick={() => session?.status === 'active' && !editMode && makePick(p.id)}
+                style={{ padding: '10px 14px', borderBottom: '1px solid rgba(255,255,255,0.04)', cursor: session?.status === 'active' && !editMode ? 'pointer' : 'default', display: 'flex', alignItems: 'center', gap: 10 }}
+                onMouseEnter={e => { if (session?.status === 'active' && !editMode) e.currentTarget.style.background = 'rgba(255,255,255,0.04)' }}
                 onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
               >
                 <div style={{ width: 30, height: 30, borderRadius: '50%', background: 'rgba(74,158,255,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, fontWeight: 700, color: '#4A9EFF', flexShrink: 0 }}>
@@ -290,7 +278,7 @@ export default function CommissionerDraft() {
                   <div style={{ fontSize: 13, fontWeight: 500, color: '#E2E8F0' }}>{p.name}</div>
                   <div style={{ fontSize: 11, color: '#6B7280', textTransform: 'capitalize' }}>{p.position || 'unknown'}</div>
                 </div>
-                {session?.status === 'active' && <div style={{ fontSize: 11, color: '#00C896', opacity: 0.5 }}>Pick</div>}
+                {session?.status === 'active' && !editMode && <div style={{ fontSize: 11, color: '#00C896', opacity: 0.5 }}>Pick</div>}
               </div>
             ))}
           </div>
@@ -305,13 +293,20 @@ export default function CommissionerDraft() {
             {sortedTeams.map(team => {
               const teamPicks = picks.filter(p => p.team_id === team.id).sort((a, b) => a.pick_number - b.pick_number)
               const isCurrentTeam = currentTeam?.id === team.id && session?.status === 'active'
+              const isTargetTeam = editMode && editingPick && editingPick.team_id !== team.id
 
               return (
-                <div key={team.id} style={{
-                  background: isCurrentTeam ? 'rgba(0,200,150,0.05)' : 'rgba(255,255,255,0.02)',
-                  border: '1px solid ' + (isCurrentTeam ? 'rgba(0,200,150,0.3)' : 'rgba(255,255,255,0.06)'),
-                  borderRadius: 8, overflow: 'hidden'
-                }}>
+                <div
+                  key={team.id}
+                  onClick={() => editMode && editingPick && movePick(editingPick.id, team.id)}
+                  style={{
+                    background: isCurrentTeam ? 'rgba(0,200,150,0.05)' : isTargetTeam ? 'rgba(74,158,255,0.04)' : 'rgba(255,255,255,0.02)',
+                    border: '1px solid ' + (isCurrentTeam ? 'rgba(0,200,150,0.3)' : isTargetTeam ? 'rgba(74,158,255,0.25)' : 'rgba(255,255,255,0.06)'),
+                    borderRadius: 8, overflow: 'hidden',
+                    cursor: editMode && editingPick ? 'pointer' : 'default',
+                    transition: 'all 0.15s'
+                  }}
+                >
                   <div style={{ padding: '8px 10px', borderBottom: '1px solid rgba(255,255,255,0.06)', background: isCurrentTeam ? 'rgba(0,200,150,0.1)' : 'transparent' }}>
                     <div style={{ fontSize: 12, fontWeight: 700, color: isCurrentTeam ? '#00C896' : '#E2E8F0' }}>{team.name}</div>
                     {team.gm_name && <div style={{ fontSize: 10, color: '#6B7280' }}>{team.gm_name}</div>}
@@ -320,16 +315,45 @@ export default function CommissionerDraft() {
                   <div style={{ padding: 6 }}>
                     {teamPicks.map(pick => {
                       const player = players.find(p => p.id === pick.registrant_id)
+                      const isSelected = editingPick?.id === pick.id
                       return (
-                        <div key={pick.id} style={{ padding: '5px 7px', borderRadius: 4, marginBottom: 3, background: 'rgba(255,255,255,0.03)' }}>
-                          <div style={{ fontSize: 11, color: '#E2E8F0', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{player?.name || '—'}</div>
-                          <div style={{ fontSize: 10, color: '#4A9EFF' }}>R{pick.round} #{pick.pick_number}{player?.players?.rating ? ' · ⭐' + player.players.rating : ''}</div>
+                        <div
+                          key={pick.id}
+                          onClick={e => {
+                            if (!editMode) return
+                            e.stopPropagation()
+                            setEditingPick(isSelected ? null : pick)
+                          }}
+                          style={{
+                            padding: '5px 7px', borderRadius: 4, marginBottom: 3,
+                            background: isSelected ? 'rgba(255,184,0,0.15)' : 'rgba(255,255,255,0.03)',
+                            border: '1px solid ' + (isSelected ? 'rgba(255,184,0,0.4)' : 'transparent'),
+                            display: 'flex', alignItems: 'center', gap: 4,
+                            cursor: editMode ? 'pointer' : 'default',
+                            transition: 'all 0.1s'
+                          }}
+                        >
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: 11, color: '#E2E8F0', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{player?.name || '—'}</div>
+                            <div style={{ fontSize: 10, color: '#4A9EFF' }}>R{pick.round} #{pick.pick_number}{player?.players?.rating ? ' · ⭐' + player.players.rating : ''}</div>
+                          </div>
+                          {editMode && (
+                            <button
+                              onClick={e => { e.stopPropagation(); deletePick(pick.id) }}
+                              style={{ background: 'transparent', border: 'none', color: '#FF6B6B', cursor: 'pointer', fontSize: 12, padding: '0 2px', flexShrink: 0 }}
+                            >✕</button>
+                          )}
                         </div>
                       )
                     })}
-                    {isCurrentTeam && (
+                    {isCurrentTeam && !editMode && (
                       <div style={{ padding: '5px 7px', borderRadius: 4, border: '1px dashed rgba(0,200,150,0.3)', textAlign: 'center', fontSize: 10, color: '#00C896' }}>
                         On the clock...
+                      </div>
+                    )}
+                    {editMode && editingPick && editingPick.team_id !== team.id && (
+                      <div style={{ padding: '5px 7px', borderRadius: 4, border: '1px dashed rgba(74,158,255,0.4)', textAlign: 'center', fontSize: 10, color: '#4A9EFF' }}>
+                        Move here
                       </div>
                     )}
                   </div>
