@@ -136,6 +136,8 @@ export default function Home() {
     const nameIdx = headers.findIndex(h => h.includes('name'))
     const emailIdx = headers.findIndex(h => h.includes('email'))
     const positionIdx = headers.findIndex(h => h.includes('position'))
+    const approvalIdx = headers.findIndex(h => h.includes('approval'))
+    const paymentIdx = headers.findIndex(h => h.includes('payment'))
 
     if (nameIdx === -1) {
       setMessage('❌ Could not find a "name" column in your CSV')
@@ -149,6 +151,8 @@ export default function Home() {
         name: cols[nameIdx] || '',
         email: emailIdx !== -1 ? cols[emailIdx] || '' : '',
         position: positionIdx !== -1 ? cols[positionIdx] || '' : '',
+        approval_status: approvalIdx !== -1 ? cols[approvalIdx] || '' : '',
+        payment_status: paymentIdx !== -1 ? cols[paymentIdx] || '' : '',
       }
     }).filter(r => r.name)
 
@@ -182,7 +186,7 @@ export default function Home() {
 
   const paymentColors = {
     paid: '#00C896',
-    unpaid: '#FFB800',
+    unpaid: '#FF6B6B',
     refunded: '#94A3B8',
   }
 
@@ -192,6 +196,23 @@ export default function Home() {
     waitlist: registrants.filter(r => r.approval_status === 'waitlist').length,
     paid: registrants.filter(r => r.payment_status === 'paid').length,
     unpaid: registrants.filter(r => r.payment_status === 'unpaid').length,
+  }
+
+  const approvedSkaters = registrants.filter(r => r.approval_status === 'approved' && r.position !== 'Goalie').length
+  const approvedGoalies = registrants.filter(r => r.approval_status === 'approved' && r.position === 'Goalie').length
+  const skaterCap = selectedLeague?.skaters_per_team || 0
+  const goalieCap = selectedLeague?.goalies_per_team || 0
+
+  async function updateCapacity(field, value) {
+    const updated = await fetch(`/api/leagues/${selectedLeague.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ [field]: parseInt(value) || 0 })
+    })
+    if (updated.ok) {
+      const data = await updated.json()
+      if (data && !data.error) setSelectedLeague(prev => ({ ...prev, [field]: parseInt(value) || 0 }))
+    }
   }
 
   const EditableCell = ({ r, field }) => {
@@ -318,6 +339,51 @@ export default function Home() {
               ))}
             </div>
 
+            {/* Capacity */}
+            {(skaterCap > 0 || goalieCap > 0) && (
+              <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
+                {skaterCap > 0 && (
+                  <div style={{ flex: 1, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: 8, padding: '12px 16px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+                      <div style={{ fontSize: 11, color: '#6B7280', textTransform: 'uppercase', letterSpacing: 1 }}>Skater Capacity</div>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: approvedSkaters >= skaterCap ? '#FF6B6B' : '#00C896' }}>{approvedSkaters} / {skaterCap}</div>
+                    </div>
+                    <div style={{ height: 4, background: 'rgba(255,255,255,0.06)', borderRadius: 2 }}>
+                      <div style={{ height: '100%', borderRadius: 2, background: approvedSkaters >= skaterCap ? '#FF6B6B' : '#00C896', width: Math.min(100, (approvedSkaters / skaterCap) * 100) + '%', transition: 'width 0.3s' }} />
+                    </div>
+                  </div>
+                )}
+                {goalieCap > 0 && (
+                  <div style={{ flex: 1, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: 8, padding: '12px 16px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+                      <div style={{ fontSize: 11, color: '#6B7280', textTransform: 'uppercase', letterSpacing: 1 }}>Goalie Capacity</div>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: approvedGoalies >= goalieCap ? '#FF6B6B' : '#00C896' }}>{approvedGoalies} / {goalieCap}</div>
+                    </div>
+                    <div style={{ height: 4, background: 'rgba(255,255,255,0.06)', borderRadius: 2 }}>
+                      <div style={{ height: '100%', borderRadius: 2, background: approvedGoalies >= goalieCap ? '#FF6B6B' : '#4A9EFF', width: Math.min(100, (approvedGoalies / goalieCap) * 100) + '%', transition: 'width 0.3s' }} />
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Capacity settings */}
+            <div style={{ display: 'flex', gap: 10, marginBottom: 16, alignItems: 'center' }}>
+              <div style={{ fontSize: 11, color: '#6B7280' }}>Capacity:</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ fontSize: 11, color: '#6B7280' }}>Skaters</span>
+                <input type="number" min="0" value={skaterCap || ''} placeholder="0"
+                  onChange={e => updateCapacity('skaters_per_team', e.target.value)}
+                  style={{ width: 52, padding: '4px 8px', borderRadius: 4, border: '1px solid rgba(255,255,255,0.1)', background: 'rgba(255,255,255,0.05)', color: '#E2E8F0', fontSize: 12, textAlign: 'center' }} />
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ fontSize: 11, color: '#6B7280' }}>Goalies</span>
+                <input type="number" min="0" value={goalieCap || ''} placeholder="0"
+                  onChange={e => updateCapacity('goalies_per_team', e.target.value)}
+                  style={{ width: 52, padding: '4px 8px', borderRadius: 4, border: '1px solid rgba(255,255,255,0.1)', background: 'rgba(255,255,255,0.05)', color: '#E2E8F0', fontSize: 12, textAlign: 'center' }} />
+              </div>
+            </div>
+
             {/* CSV Import */}
             <div style={{ marginBottom: 24, display: 'flex', alignItems: 'center', gap: 12 }}>
               <label style={{
@@ -374,7 +440,7 @@ export default function Home() {
                         <td style={{ padding: '10px 16px' }}>
                           <select value={r.payment_status || 'unpaid'} onChange={e => updateStatus(r.id, 'payment_status', e.target.value)} style={{
                             background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)',
-                            color: paymentColors[r.payment_status] || '#94A3B8', borderRadius: 4, padding: '4px 8px', fontSize: 12, cursor: 'pointer'
+                            color: paymentColors[r.payment_status || 'unpaid'], borderRadius: 4, padding: '4px 8px', fontSize: 12, cursor: 'pointer'
                           }}>
                             <option value="unpaid">Unpaid</option>
                             <option value="paid">Paid</option>

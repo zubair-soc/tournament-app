@@ -9,24 +9,26 @@ export default function GMDraft() {
   const [teams, setTeams] = useState([])
   const [players, setPlayers] = useState([])
   const [picks, setPicks] = useState([])
+  const [wishlist, setWishlist] = useState([])
   const [authorized, setAuthorized] = useState(false)
   const [codeInput, setCodeInput] = useState('')
   const [codeError, setCodeError] = useState(false)
   const [search, setSearch] = useState('')
   const [filterPosition, setFilterPosition] = useState('all')
   const [timeLeft, setTimeLeft] = useState(null)
-  const [picking, setPicking] = useState(false)
   const [myTeam, setMyTeam] = useState(null)
+  const [activeSlot, setActiveSlot] = useState(null)
+  const [slotSearch, setSlotSearch] = useState('')
   const timerRef = useRef(null)
   const pollRef = useRef(null)
 
   useEffect(() => {
-    if (authorized) {
+    if (authorized && myTeam) {
       fetchAll()
       pollRef.current = setInterval(fetchAll, 2000)
     }
     return () => { clearInterval(pollRef.current); clearInterval(timerRef.current) }
-  }, [authorized, id])
+  }, [authorized, myTeam, id])
 
   useEffect(() => {
     if (session?.timer_seconds && session?.timer_started_at && session?.status === 'active') {
@@ -57,12 +59,13 @@ export default function GMDraft() {
   }
 
   async function fetchAll() {
-    const [leagueRes, sessionRes, teamsRes, playersRes, picksRes] = await Promise.all([
+    const [leagueRes, sessionRes, teamsRes, playersRes, picksRes, wishlistRes] = await Promise.all([
       fetch('/api/leagues/' + id),
       fetch('/api/draft/session?league_id=' + id),
       fetch('/api/draft/teams?league_id=' + id),
       fetch('/api/registrants?league_id=' + id),
-      fetch('/api/draft/pick?league_id=' + id)
+      fetch('/api/draft/pick?league_id=' + id),
+      fetch('/api/draft/wishlist?team_id=' + myTeam?.id)
     ])
     setLeague(await leagueRes.json())
     setSession(await sessionRes.json())
@@ -71,6 +74,24 @@ export default function GMDraft() {
     setPlayers(Array.isArray(p) ? p.filter(r => r.approval_status === 'approved' && r.payment_status === 'paid') : [])
     const picksData = await picksRes.json()
     setPicks(Array.isArray(picksData) ? picksData : [])
+    const wData = await wishlistRes.json()
+    setWishlist(Array.isArray(wData) ? wData : [])
+  }
+
+  async function assignSlot(slot, registrant_id) {
+    await fetch('/api/draft/wishlist', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ team_id: myTeam.id, registrant_id, slot })
+    })
+    setActiveSlot(null)
+    setSlotSearch('')
+    fetchAll()
+  }
+
+  async function clearSlot(slot) {
+    await fetch(`/api/draft/wishlist?team_id=${myTeam.id}&slot=${slot}`, { method: 'DELETE' })
+    fetchAll()
   }
 
   function getCurrentTeam() {
@@ -79,30 +100,9 @@ export default function GMDraft() {
     const pick = session.current_pick
     const n = sortedTeams.length
     const round = Math.ceil(pick / n)
-    const posInRound = ((pick - 1) % n)
-    const idx = round % 2 === 0 ? (n - 1 - posInRound) : posInRound
+    const posInRound = (pick - 1) % n
+    const idx = round % 2 === 1 ? posInRound : (n - 1 - posInRound)
     return sortedTeams[idx]
-  }
-
-  async function makePick(registrantId) {
-    const currentTeam = getCurrentTeam()
-    if (!currentTeam || session?.status !== 'active' || picking) return
-    setPicking(true)
-    await fetch('/api/draft/pick', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        league_id: id, team_id: currentTeam.id, registrant_id: registrantId,
-        pick_number: session.current_pick, round: Math.ceil(session.current_pick / teams.length)
-      })
-    })
-    await fetch('/api/draft/session', {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ league_id: id, current_pick: session.current_pick + 1, timer_started_at: new Date().toISOString() })
-    })
-    await fetchAll()
-    setPicking(false)
   }
 
   const pickedIds = new Set(picks.map(p => p.registrant_id))
@@ -110,6 +110,10 @@ export default function GMDraft() {
   const sortedTeams = [...teams].sort((a, b) => (a.draft_order || 0) - (b.draft_order || 0))
   const isActive = session?.status === 'active'
   const timerColor = timeLeft !== null ? (timeLeft > 30 ? '#00C896' : timeLeft > 10 ? '#FFB800' : '#FF6B6B') : '#4A9EFF'
+  const isMyTurn = isActive && currentTeam?.id === myTeam?.id
+
+  const picksPerTeam = (league?.skaters_per_team || 0) + (league?.goalies_per_team || 0) || Math.ceil(players.length / (teams.length || 1))
+  const slots = Array.from({ length: picksPerTeam }, (_, i) => i + 1)
 
   const availablePlayers = players
     .filter(p => {
@@ -119,6 +123,15 @@ export default function GMDraft() {
       return true
     })
     .sort((a, b) => (b.players?.rating || 0) - (a.players?.rating || 0))
+
+  const slotPlayers = players
+    .filter(p => {
+      if (pickedIds.has(p.id)) return false
+      if (slotSearch && !p.name.toLowerCase().includes(slotSearch.toLowerCase())) return false
+      return true
+    })
+    .sort((a, b) => (b.players?.rating || 0) - (a.players?.rating || 0))
+    .slice(0, 8)
 
   if (!authorized) {
     return (
@@ -170,11 +183,17 @@ export default function GMDraft() {
           </div>
         )}
 
-        {currentTeam && session?.status !== 'complete' && (
-          <div style={{ textAlign: 'center', background: isActive ? 'rgba(0,200,150,0.08)' : 'rgba(255,255,255,0.03)', border: '1px solid ' + (isActive ? 'rgba(0,200,150,0.25)' : 'rgba(255,255,255,0.08)'), borderRadius: 8, padding: '8px 16px' }}>
+        {isMyTurn && (
+          <div style={{ background: 'rgba(0,200,150,0.1)', border: '1px solid rgba(0,200,150,0.3)', borderRadius: 8, padding: '8px 16px', textAlign: 'center' }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: '#00C896' }}>🏒 You're on the clock!</div>
+            <div style={{ fontSize: 10, color: '#6B7280' }}>Commissioner will make your pick</div>
+          </div>
+        )}
+
+        {currentTeam && session?.status !== 'complete' && !isMyTurn && (
+          <div style={{ textAlign: 'center', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 8, padding: '8px 16px' }}>
             <div style={{ fontSize: 10, color: '#6B7280', textTransform: 'uppercase', letterSpacing: 1 }}>Pick #{session?.current_pick}</div>
-            <div style={{ fontSize: 15, fontWeight: 700, color: isActive ? '#00C896' : '#94A3B8' }}>{currentTeam.name}</div>
-            {currentTeam.gm_name && <div style={{ fontSize: 10, color: '#6B7280' }}>{currentTeam.gm_name}</div>}
+            <div style={{ fontSize: 15, fontWeight: 700, color: '#94A3B8' }}>{currentTeam.name}</div>
           </div>
         )}
 
@@ -192,8 +211,8 @@ export default function GMDraft() {
 
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
 
-        {/* Player pool */}
-        <div style={{ width: 280, borderRight: '1px solid rgba(255,255,255,0.06)', display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
+        {/* Left - Player pool */}
+        <div style={{ width: 260, borderRight: '1px solid rgba(255,255,255,0.06)', display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
           <div style={{ padding: '14px', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
             <div style={{ fontSize: 11, color: '#6B7280', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 1 }}>
               Available ({availablePlayers.length})
@@ -216,21 +235,9 @@ export default function GMDraft() {
               ))}
             </div>
           </div>
-
           <div style={{ flex: 1, overflowY: 'auto' }}>
             {availablePlayers.map(p => (
-              <div
-                key={p.id}
-                onClick={() => isActive && !picking && makePick(p.id)}
-                style={{
-                  padding: '10px 14px', borderBottom: '1px solid rgba(255,255,255,0.04)',
-                  cursor: isActive && !picking ? 'pointer' : 'default',
-                  display: 'flex', alignItems: 'center', gap: 10,
-                  opacity: isActive ? 1 : 0.5
-                }}
-                onMouseEnter={e => { if (isActive && !picking) e.currentTarget.style.background = 'rgba(255,255,255,0.04)' }}
-                onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
-              >
+              <div key={p.id} style={{ padding: '10px 14px', borderBottom: '1px solid rgba(255,255,255,0.04)', display: 'flex', alignItems: 'center', gap: 10 }}>
                 <div style={{ width: 30, height: 30, borderRadius: '50%', background: 'rgba(74,158,255,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, fontWeight: 700, color: '#4A9EFF', flexShrink: 0 }}>
                   {p.players?.rating ?? '?'}
                 </div>
@@ -238,13 +245,12 @@ export default function GMDraft() {
                   <div style={{ fontSize: 13, fontWeight: 500, color: '#E2E8F0' }}>{p.name}</div>
                   <div style={{ fontSize: 11, color: '#6B7280', textTransform: 'capitalize' }}>{p.position || 'unknown'}</div>
                 </div>
-                {isActive && <div style={{ fontSize: 11, color: '#00C896', opacity: 0.5 }}>Pick</div>}
               </div>
             ))}
           </div>
         </div>
 
-        {/* Draft board */}
+        {/* Middle - Draft board */}
         <div style={{ flex: 1, overflowY: 'auto', overflowX: 'auto', padding: 20 }}>
           <div style={{ fontSize: 11, color: '#6B7280', marginBottom: 14, textTransform: 'uppercase', letterSpacing: 1 }}>
             Draft Board — {picks.length} picks made
@@ -253,15 +259,18 @@ export default function GMDraft() {
             {sortedTeams.map(team => {
               const teamPicks = picks.filter(p => p.team_id === team.id).sort((a, b) => a.pick_number - b.pick_number)
               const isCurrentTeam = currentTeam?.id === team.id && isActive
+              const isMyTeamCol = team.id === myTeam?.id
 
               return (
                 <div key={team.id} style={{
-                  background: isCurrentTeam ? 'rgba(0,200,150,0.05)' : 'rgba(255,255,255,0.02)',
-                  border: '1px solid ' + (isCurrentTeam ? 'rgba(0,200,150,0.3)' : 'rgba(255,255,255,0.06)'),
+                  background: isCurrentTeam ? 'rgba(0,200,150,0.05)' : isMyTeamCol ? 'rgba(74,158,255,0.03)' : 'rgba(255,255,255,0.02)',
+                  border: '1px solid ' + (isCurrentTeam ? 'rgba(0,200,150,0.3)' : isMyTeamCol ? 'rgba(74,158,255,0.2)' : 'rgba(255,255,255,0.06)'),
                   borderRadius: 8, overflow: 'hidden'
                 }}>
-                  <div style={{ padding: '8px 10px', borderBottom: '1px solid rgba(255,255,255,0.06)', background: isCurrentTeam ? 'rgba(0,200,150,0.1)' : 'transparent' }}>
-                    <div style={{ fontSize: 12, fontWeight: 700, color: isCurrentTeam ? '#00C896' : '#E2E8F0' }}>{team.name}</div>
+                  <div style={{ padding: '8px 10px', borderBottom: '1px solid rgba(255,255,255,0.06)', background: isCurrentTeam ? 'rgba(0,200,150,0.1)' : isMyTeamCol ? 'rgba(74,158,255,0.08)' : 'transparent' }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: isCurrentTeam ? '#00C896' : isMyTeamCol ? '#4A9EFF' : '#E2E8F0' }}>
+                      {team.name}{isMyTeamCol ? ' (You)' : ''}
+                    </div>
                     {team.gm_name && <div style={{ fontSize: 10, color: '#6B7280' }}>{team.gm_name}</div>}
                     <div style={{ fontSize: 10, color: '#6B7280', marginTop: 2 }}>{teamPicks.length} picks</div>
                   </div>
@@ -281,6 +290,89 @@ export default function GMDraft() {
                       </div>
                     )}
                   </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+
+        {/* Right - Wishlist */}
+        <div style={{ width: 240, borderLeft: '1px solid rgba(255,255,255,0.06)', display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
+          <div style={{ padding: '14px', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+            <div style={{ fontSize: 11, color: '#6B7280', textTransform: 'uppercase', letterSpacing: 1 }}>My Draft List</div>
+            <div style={{ fontSize: 10, color: '#6B7280', marginTop: 4 }}>Click a slot to assign a player</div>
+          </div>
+
+          <div style={{ flex: 1, overflowY: 'auto', padding: '8px' }}>
+            {slots.map(slot => {
+              const entry = wishlist.find(w => w.slot === slot)
+              const isPicked = entry && pickedIds.has(entry.registrant_id)
+              const isOpen = activeSlot === slot
+
+              return (
+                <div key={slot} style={{ marginBottom: 6 }}>
+                  <div
+                    onClick={() => !isPicked && setActiveSlot(isOpen ? null : slot)}
+                    style={{
+                      padding: '8px 10px', borderRadius: 6,
+                      border: '1px solid ' + (isOpen ? 'rgba(74,158,255,0.4)' : isPicked ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.08)'),
+                      background: isOpen ? 'rgba(74,158,255,0.06)' : isPicked ? 'rgba(255,255,255,0.02)' : 'rgba(255,255,255,0.03)',
+                      cursor: isPicked ? 'default' : 'pointer',
+                      opacity: isPicked ? 0.5 : 1
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <div style={{ fontSize: 10, color: '#6B7280', width: 40, flexShrink: 0 }}>Pick {slot}</div>
+                      {entry ? (
+                        <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <div style={{ flex: 1 }}>
+                            <div style={{ fontSize: 12, fontWeight: 500, color: isPicked ? '#6B7280' : '#E2E8F0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {isPicked ? '✓ ' : ''}{entry.registrants?.name}
+                            </div>
+                            {entry.registrants?.players?.rating && (
+                              <div style={{ fontSize: 10, color: '#4A9EFF' }}>⭐ {entry.registrants.players.rating}</div>
+                            )}
+                          </div>
+                          {!isPicked && (
+                            <button onClick={e => { e.stopPropagation(); clearSlot(slot) }} style={{ background: 'transparent', border: 'none', color: '#6B7280', cursor: 'pointer', fontSize: 11, padding: '0 2px' }}>✕</button>
+                          )}
+                        </div>
+                      ) : (
+                        <div style={{ flex: 1, fontSize: 11, color: '#4B5563', fontStyle: 'italic' }}>— empty —</div>
+                      )}
+                    </div>
+                  </div>
+
+                  {isOpen && (
+                    <div style={{ background: '#0F1629', border: '1px solid rgba(74,158,255,0.2)', borderRadius: 6, marginTop: 4, overflow: 'hidden' }}>
+                      <input
+                        autoFocus
+                        placeholder="Search player..."
+                        value={slotSearch}
+                        onChange={e => setSlotSearch(e.target.value)}
+                        onClick={e => e.stopPropagation()}
+                        style={{ width: '100%', padding: '7px 10px', border: 'none', borderBottom: '1px solid rgba(255,255,255,0.06)', background: 'transparent', color: '#E2E8F0', fontSize: 12, boxSizing: 'border-box', outline: 'none' }}
+                      />
+                      {slotPlayers.map(p => (
+                        <div
+                          key={p.id}
+                          onClick={() => assignSlot(slot, p.id)}
+                          style={{ padding: '7px 10px', cursor: 'pointer', borderBottom: '1px solid rgba(255,255,255,0.04)', display: 'flex', alignItems: 'center', gap: 8 }}
+                          onMouseEnter={e => e.currentTarget.style.background = 'rgba(74,158,255,0.08)'}
+                          onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                        >
+                          <div style={{ fontSize: 11, color: '#4A9EFF', width: 20, textAlign: 'center' }}>{p.players?.rating ?? '?'}</div>
+                          <div>
+                            <div style={{ fontSize: 12, color: '#E2E8F0' }}>{p.name}</div>
+                            <div style={{ fontSize: 10, color: '#6B7280', textTransform: 'capitalize' }}>{p.position}</div>
+                          </div>
+                        </div>
+                      ))}
+                      {slotPlayers.length === 0 && (
+                        <div style={{ padding: '10px', fontSize: 11, color: '#6B7280', textAlign: 'center' }}>No players found</div>
+                      )}
+                    </div>
+                  )}
                 </div>
               )
             })}
